@@ -1,5 +1,7 @@
 # Lab-only build: tag `lab-vX.Y.Z` -> self-hosted ARC runner -> remote rootless buildkitd -> Zot.
 # (NOT for upstream — this is robgil/infra lab CI. The image is consumed by flux/apps/rkllama.)
+# Mirrors robgil/planner's release.yml: the runner image has no buildctl, so install it; the build runs
+# on the shared buildkitd over TCP; push creds come from the ZOT_DOCKERCONFIG repo secret.
 name: container
 
 on:
@@ -7,10 +9,6 @@ on:
     tags:
       - 'lab-v*'
   workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Image tag to push (e.g. lab-v0.1.0)'
-        required: true
 
 permissions:
   contents: read
@@ -19,31 +17,37 @@ jobs:
   build:
     runs-on: rk-llama-arc          # matches the gha-runner-scale-set runnerScaleSetName
     env:
+      BUILDKIT_HOST: tcp://buildkitd.arc-runners.svc.cluster.local:1234
+      BUILDKIT_VERSION: v0.30.0
       REGISTRY: registry.internal
       IMAGE: rk-llama-server
-      BUILDKIT_ADDR: tcp://buildkitd.arc-runners.svc:1234
+      TAG: ${{ github.ref_name }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Resolve image tag
-        id: tag
-        run: echo "tag=${{ github.event.inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+      - name: Install buildctl
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://github.com/moby/buildkit/releases/download/${BUILDKIT_VERSION}/buildkit-${BUILDKIT_VERSION}.linux-arm64.tar.gz" \
+            | tar -xz -C /tmp
+          echo "/tmp/bin" >> "$GITHUB_PATH"
+          /tmp/bin/buildctl --version
 
-      # Zot push credentials (the `ci` htpasswd user). Secret is a full docker config.json,
-      # created out-of-band from `pass lab/zot/ci`. buildctl reads it for registry auth.
+      # Zot push credentials (the `ci` htpasswd user). Secret is a full docker config.json, created
+      # out-of-band from `pass lab/zot/ci`. buildctl reads it for registry auth; buildkitd trusts the lab CA.
       - name: Configure registry auth
         run: |
-          install -d -m 700 "$HOME/.docker"
+          set -euo pipefail
+          mkdir -p "$HOME/.docker"
           printf '%s' '${{ secrets.ZOT_DOCKERCONFIG }}' > "$HOME/.docker/config.json"
 
       - name: Build and push (buildctl -> buildkitd -> Zot)
         run: |
-          buildctl --addr "$BUILDKIT_ADDR" build \
+          set -euo pipefail
+          buildctl build \
             --frontend dockerfile.v0 \
             --local context=. \
             --local dockerfile=.devops \
             --opt filename=rknpu2.Dockerfile \
-            --output type=image,name=${REGISTRY}/${IMAGE}:${{ steps.tag.outputs.tag }},push=true
-
-      - name: Done
-        run: echo "pushed ${REGISTRY}/${IMAGE}:${{ steps.tag.outputs.tag }}"
+            --output "type=image,name=${REGISTRY}/${IMAGE}:${TAG},push=true,oci-mediatypes=true"
+          echo "pushed ${REGISTRY}/${IMAGE}:${TAG}"
