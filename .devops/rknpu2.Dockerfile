@@ -14,7 +14,9 @@
 
 ARG UBUNTU_VERSION=bookworm
 
-FROM debian:${UBUNTU_VERSION} AS build
+# Bases pinned by manifest-list digest for reproducible rebuilds; refresh the digests to pick up
+# new Debian point/security releases.
+FROM debian:${UBUNTU_VERSION}@sha256:268fb24c39bca92d326dd83ea3abebe4a3f7751c804ffef23bb6d857dd343ff8 AS build
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential cmake git ca-certificates libcurl4-openssl-dev \
     && rm -rf /var/lib/apt/lists/*
@@ -26,8 +28,10 @@ RUN cmake -B build \
         -DLLAMA_CURL=ON \
     && cmake --build build -j"$(nproc)" --target llama-server llama-cli llama-bench
 
-FROM debian:${UBUNTU_VERSION}-slim AS runtime
-RUN apt-get update && apt-get install -y --no-install-recommends \
+FROM debian:${UBUNTU_VERSION}-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS runtime
+# upgrade: pull any bookworm-security fixes newer than the pinned base snapshot.
+RUN apt-get update && apt-get upgrade -y --no-install-recommends \
+    && apt-get install -y --no-install-recommends \
         libcurl4 libgomp1 ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 # Built binaries + the ggml/llama shared libraries (incl. libggml-rknpu2.so).
